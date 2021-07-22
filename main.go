@@ -69,7 +69,7 @@ func main() {
 	// 	log.Fatal(err)
 	// }
 
-	app := New(&Config{})
+	app, _ := New(&Config{})
 	app.Listen(":3001")
 }
 
@@ -80,11 +80,12 @@ type Connection struct {
 }
 
 // TODO: Just call this NEW and mount it in the app?
-func New(config *Config) *fiber.App {
+func New(config *Config) (*fiber.App, func(string, string) error) {
 	app := fiber.New()
 
 	publisher := make(chan *Connection)
 	channels := make(map[string][]chan string)
+
 	if config.AddToChannel == nil {
 		config.AddToChannel = func(channelId string) error {
 			_, ok := channels[channelId]
@@ -118,8 +119,18 @@ func New(config *Config) *fiber.App {
 		}
 	}
 
+	publish := func(channelId string, value string) error {
+		channels := config.GetChannelSubscribers(channelId)
+
+		for channel := range channels {
+			channels[channel] <- value
+		}
+
+		return nil
+	}
+
 	// TODO: After middleware?
-	app.Post("/publish/:channelId", config.PublishMiddleware, publishToChannel(config))
+	app.Post("/publish/:channelId", config.PublishMiddleware, publishToChannel(config, publish))
 
 	app.Use(func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -145,15 +156,15 @@ func New(config *Config) *fiber.App {
 		}
 	}()
 
-	return app
+	return app, publish
 }
 
-func publishToChannel(config *Config) fiber.Handler {
+func publishToChannel(config *Config, publish func(string, string) error) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		channels := config.GetChannelSubscribers(c.Params("id"))
+		err := publish(c.Params("id"), string(c.Body()))
 
-		for channel := range channels {
-			channels[channel] <- string(c.Body())
+		if err != nil {
+			return c.SendStatus(500)
 		}
 
 		return c.SendStatus(200)
