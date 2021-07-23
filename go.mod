@@ -1,4 +1,4 @@
-module go-ws-pubsub
+module gopubsub
 
 go 1.14
 
