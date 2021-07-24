@@ -1,4 +1,4 @@
-module gopubsub
+module github.com/mgebeily/go-pubsub
 
 go 1.14
 
