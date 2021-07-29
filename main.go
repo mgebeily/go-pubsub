@@ -3,6 +3,7 @@ package gopubsub
 import (
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
@@ -73,41 +74,62 @@ func main() {
 	app.Listen(":3001")
 }
 
+// type Config struct {
+// 	ChannelLookup        string
+// 	ErrorHandler         string
+// 	PublishTokenLookup   string
+// 	SubscribeTokenLookup string
+
+// 	GetChannelSubscribers func(string) []chan string
+// 	CanJoinChannel        func(*fiber.Ctx, string) bool
+// 	PublishMiddleware     func(*fiber.Ctx) error
+// 	SubscribeMiddleware   func(*fiber.Ctx) error
+
+//** 	AddToChannel      func(string) error
+//** 	RemoveFromChannel func(string) error
+// }
+
+type ChannelList struct {
+	Channels map[string][]chan string
+}
+
+type Message struct {
+	ChannelId string
+	Message   string
+}
+
 // TODO: This with pure channels
 type Connection struct {
 	ChannelId  string
 	Subscriber chan string
 }
 
-// TODO: Just call this NEW and mount it in the app?
-func New(config *Config) (*fiber.App, func(string, string) error) {
+func New(config *Config) (*fiber.App, chan *Message) {
 	app := fiber.New()
 
-	publisher := make(chan *Connection)
-	channels := make(map[string][]chan string)
+	messagesChannel := make(chan *Message)
+	connectionsChannel := make(chan *Connection)
 
-	if config.AddToChannel == nil {
-		config.AddToChannel = func(channelId string) error {
-			_, ok := channels[channelId]
-			if !ok {
-				channels[channelId] = []chan string{}
-			}
+	go func() {
+		state := make(map[string][]chan string)
+		mutex := &sync.Mutex{}
 
-			channels[channelId] = append(channels[channelId], make(chan string))
-
-			return nil
-		}
-	}
-	if config.GetChannelSubscribers == nil {
-		config.GetChannelSubscribers = func(channelId string) []chan string {
-			channel, ok := channels[channelId]
-			if !ok {
-				return []chan string{}
-			} else {
-				return channel
+		for {
+			select {
+			case message := <-messagesChannel:
+				mutex.Lock()
+				for _, channel := range state[message.ChannelId] {
+					channel <- message.Message
+				}
+				mutex.Unlock()
+			case connection := <-connectionsChannel:
+				mutex.Lock()
+				state[connection.ChannelId] = append(state[connection.ChannelId], connection.Subscriber)
+				mutex.Unlock()
 			}
 		}
-	}
+	}()
+
 	if config.SubscribeMiddleware == nil {
 		config.SubscribeMiddleware = func(c *fiber.Ctx) error {
 			return c.Next()
@@ -120,12 +142,6 @@ func New(config *Config) (*fiber.App, func(string, string) error) {
 	}
 
 	publish := func(channelId string, value string) error {
-		channels := config.GetChannelSubscribers(channelId)
-
-		for channel := range channels {
-			channels[channel] <- value
-		}
-
 		return nil
 	}
 
@@ -144,19 +160,13 @@ func New(config *Config) (*fiber.App, func(string, string) error) {
 		config.SubscribeMiddleware,
 		func(c *fiber.Ctx) error {
 			channel := make(chan string)
-			publisher <- &Connection{ChannelId: c.Params("id"), Subscriber: channel}
+			connectionsChannel <- &Connection{ChannelId: c.Params("channelId"), Subscriber: channel}
 			c.Locals("channel", channel)
 			return c.Next()
 		},
 		subscribeToChannel(config))
 
-	go func() {
-		for channel := range publisher {
-			channels[channel.ChannelId] = append(channels[channel.ChannelId], channel.Subscriber)
-		}
-	}()
-
-	return app, publish
+	return app, messagesChannel
 }
 
 func publishToChannel(config *Config, publish func(string, string) error) fiber.Handler {
